@@ -1,0 +1,569 @@
+---
+title: "Talent Management Analysis"
+author: "Allison Roderick"
+date: "August 12, 2019"
+output: html_document
+---
+
+```{r setup, warning=FALSE, message=FALSE}
+# Load required libraries
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(e1071)
+library(stringr)
+library(ggpubr)
+library(knitr)
+library(caret)
+library(GGally)
+library(olsrr)
+# library(kableExtra)
+# library(lemon)
+# knit_print.data.frame = lemon_print
+
+# Read in data
+path1="C:/Users/Allison/Desktop/SMU/19U/Doing Data Science/MSDS-6306-Doing-Data-Science/UNIT 14/CaseStudy2-data.csv"
+df=read.csv(path1)
+
+# Remove variables that are monotonic
+df = subset(df, select=-c(EmployeeCount,StandardHours,Over18))
+
+# Create a new variable that gets the last word of JobRole
+df = df %>% mutate(Role = word(JobRole,-1))
+df$Role = as.factor(df$Role)
+
+# Create a new variable that is an indicator for Attrition
+df = df %>% mutate(Attrit = ifelse(Attrition == 'Yes',1,0))
+
+# Create new dataframe that only has numeric variables (along with ID and Attrition)
+nums = unlist(lapply(df, is.numeric))  
+nums[[3]]=TRUE
+df_num=df[,nums]
+
+# Create new dataframe that only has factor variables (along with ID and Attrition)
+nums = unlist(lapply(df, is.numeric))  
+nums[[1]]=FALSE
+df_factor=df[,!nums]
+
+```
+
+# Introduction
+
+**Who You Are** Frito-Lay has over 10,000 employees across multiple departments and at multiple levels. The company is looking to utilize data science to understand and reduce voluntary employee attrition. 
+
+**Who We Are** For over a decade and for dozens of customers, DDSAnalytics has specialized in using data science to provide talent management solutions.
+
+**What We Offer** In this report, we will identify the top factors contributing to attrition, the top factors that predict monthly income, and we will provide predicted values for both on a subset of  employees.
+
+Please see a video presentation of this analysis at https://youtu.be/bP_vMaD4bpg.
+
+# Attrition
+
+## Exploratory Data Analysis
+
+We were given a dataset of 870 employees with both numeric variables (e.g., Monthly Income, Age, etc.) and categorical variables (e.g. Over Time, Job Role, etc.). To begin our exploratory data analysis, we split up the numeric and categorical ("factor") variables.
+
+### Numeric Variables
+
+#### A statistical approach
+
+In this exploratory stage, our goal is to understand what variables are highly correlated to attrition. To accomplish this with numeric variables, we performed Welch's Two Sample T Tests on each of the variables. These tests answer the question: Is the mean of the variable for employees who left the company significantly different than those who stayed at the company?
+
+```{r ttests}
+# Split numeric dataset into Attritions and no Attritions
+AttritionYes = df_num %>% filter(Attrition=='Yes')
+AttritionNo = df_num %>% filter(Attrition=='No')
+
+# Iteratively perform t tests
+my_cols = vector()
+p=vector()
+for (i in 4 : 26) {
+  t=t.test(AttritionNo[,i],AttritionYes[,i],
+           alternative = "two.sided", var.equal = FALSE)
+ p[i-3] = t$p.value
+ my_cols[i-3] = colnames(AttritionNo)[i]
+}
+# Perform t test on age which is in column 2
+t=t.test(AttritionNo$Age,AttritionYes$Age,alternative = "two.sided", var.equal = FALSE)
+p[27-3]=t$p.value
+my_cols[27-3]="Age"
+
+# Create dataframe of variables and associated p-values
+my_num = as.data.frame(cbind(my_cols,p))
+options(scipen=999)
+my_num$p.num = as.numeric(as.character(my_num$p))
+my_num$p.num = round(my_num$p.num,10)
+my_num = my_num[order(my_num$p.num),]
+my_num1=subset(my_num, select=c(my_cols, p.num))
+kable(my_num1,col.names = c("Variable","P-Value"), row.names =FALSE)
+
+```
+
+From the table above, we can see that there are 15 numeric variables that have different means depending on whether the employee attritted or not (15 variables with p-value less than the alpha level of 0.1). The other 9 variables have no evidence that the mean values are different depending on attrition. Thus, the initial numeric variables we are considering in our Attrition model are:
+
+* MonthlyIncome
+
+* JobLevel
+
+* TotalWorkingYears
+
+* YearsInCurrentRole
+
+* JobInvolvement
+
+* YearsWithCurrManager
+
+* StockOptionLevel
+
+* Age
+
+* YearsAtCompany
+
+* JobSatisfaction
+
+* DistanceFromHome
+
+* WorkLifeBalance
+
+* EnvironmentSatisfaction
+
+* TrainingTimesLastYear
+
+* NumCompaniesWorked
+
+
+#### A visual approach
+
+We can visually compare the variables by whether the employee attritted or not by looking at boxplots of the data. Below can see visually that
+
+* Some variables, like MonthlyIncome and TotalWorkingYears, have significantly different means depending on Attrition
+
+* Some variables, like Education and YearsSinceLastPromotion, have no significant difference in means depending on Attrition
+
+```{r boxplots, out.width="100%"}
+# Create boxplots for two variables wih strong correlation to Attrition, two without
+p1=ggplot(df, aes(x = Attrition, y = MonthlyIncome, fill = Attrition)) +
+  geom_boxplot() +
+  theme_light() + theme(legend.position="none")
+p2=ggplot(df, aes(x = Attrition, y = TotalWorkingYears, fill = Attrition)) +
+  geom_boxplot() +
+  theme_light() + theme(legend.position="none")
+p3=ggplot(df, aes(x = Attrition, y = Education, fill = Attrition)) +
+  geom_boxplot() +
+  theme_light() + theme(legend.position="none")
+p4=ggplot(df, aes(x = Attrition, y = YearsSinceLastPromotion , fill = Attrition)) +
+  geom_boxplot() +
+  theme_light() + theme(legend.position="none")
+fig1=ggarrange(p1,p2,ncol=2,nrow=1)
+annotate_figure(fig1,top=text_grob("Significant Difference in Means by Attrition"))
+fig2=ggarrange(p3,p4,ncol=2,nrow=1)
+annotate_figure(fig2,top=text_grob("No Significant Difference in Means by Attrition"))
+```
+
+### Categorical Variables
+#### A statistical approach
+Next, we look at the categorical variables. Below is an example table comparing one of our categorical variables, BusinessTravel, to Attrition.
+
+```{r businesstravel}
+table = table(df_factor[,3], df_factor$Attrition)
+kable(table, caption=colnames(df_factor)[3])
+```
+
+We can see that, for both "Yes" and "No" Attrition employees, most travel rarely, while some travel frequently, and the smallest group is non-travel. However, we want to be able to show statistically whether Attrition and BusinessTravel are related. Hence, we use a chi-square test for independence on all of the categorical variables, testing to see if they are related to Attrition.
+
+```{r chisq}
+# Iteratively perform chi squared test
+fact_cols = vector()
+p.chisq=vector()
+for (i in 3:10) {
+  table = table(df_factor[,i], df_factor$Attrition)
+  chi = chisq.test(table)
+  p.chisq[i-2] = chi$p.value
+  fact_cols[i-2] = colnames(df_factor)[i]
+}
+
+# Create dataframe of variables and associated p-values
+my_fact = as.data.frame(cbind(fact_cols,p.chisq))
+options(scipen=999)
+my_fact$p.num = as.numeric(as.character(my_fact$p.chisq))
+my_fact$p.num = round(my_fact$p.num,10)
+my_fact = subset(my_fact,select=-p.chisq)
+my_fact = my_fact[order(my_fact$p.num),]
+my_fact1=subset(my_fact, select=c(fact_cols, p.num))
+kable(my_fact1,col.names = c("Variable","P-Value"), row.names =FALSE)
+
+```
+
+As shown in the table above, there are 6 categorical variables that show evidence of association with Attrition (6 variables with p-value less than alpha=0.1). The other 2 variables have no evidence of association with Attrition. 
+
+**Note** The variable Role was created for this analysis in efforts to reduce the number of distinct values that JobRole can take on. As we see above, JobRole is a highly associated variable with Attrition. However, as we see in the table below, some combinations of JobRole and Attrition occur very few times (e.g., only one Research Director has attritted). Thus, when we train our model, we will run into issues of not having enough information to make predictions off of such combinations.
+
+```{r role}
+table = table(df_factor$JobRole, df_factor$Attrition)
+table2 = table(df_factor$Role, df_factor$Attrition)
+table %>% kable(caption="JobRole")
+table2 %>% kable(caption="Role")
+```
+
+However, when we try to combine some of the groups of JobRole by taking only the last word of JobRole to create Role, we see fewer such issues.
+
+Thus, the categorical variables we are considering in our Attrition model are:
+
+* OverTime
+
+* MaritalStatus
+
+* Role
+
+* Department
+
+* BusinessTravel
+
+
+#### A visual approach
+We can visualize the difference between association with Attrition and no association with Attrition as shown below.
+
+```{r catvis, out.width="100%"}
+# barplot for Role - association with Attrition
+agg = count(df_factor, Role, Attrition) %>%
+  mutate(Percentage = n / sum(n))
+agg_ord = mutate(agg, Role = reorder(Role,-Percentage,sum))
+v1=ggplot(agg_ord) +
+  geom_col(aes(x = Role, y = Percentage, fill = Attrition)) + 
+  ggtitle("Attrition Signficantly Lower Proportion for Directors, Executives") + 
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+# barplot for EducationField - no association with Attrition
+agg = count(df_factor, EducationField, Attrition) %>%
+  mutate(Percentage = n / sum(n))
+agg_ord = mutate(agg, EducationField = reorder(EducationField,-Percentage,sum))
+v2=ggplot(agg_ord) +
+  geom_col(aes(x = EducationField, y = Percentage, fill = Attrition)) + 
+  ggtitle("No Association Between EducationField and Attrition")  + 
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+fig1=ggarrange(v1,v2,ncol=1,nrow=2)
+fig1
+```
+
+In the first plot above, we see that "Yes" attritted employees do not follow the overall distribution of employees by Role.
+
+* Directors have a smaller share of the employees that attritted than they do of employees overall.
+* Representatives have a larger share of employees that attrtted than they do of employees overall.
+
+In the second plot, we see that the "Yes"attritted employees do follow the general distributions of employees by EducationField. These graphs reiterate the fact that Role is signficantly associated with Attrition, while EducationField is not.
+
+## Modeling Attrition - Naive Bayes
+
+For our model, we chose to use a Naive Bayes model. Naive Bayes is a relatively simple model that is good at predicting "Yes"/"No" binary data, as we have with Attrition.
+
+One potential concern with Naive Bayes is that the model assumes all of the predictors are independent. We will see later, when exploring MonthlyIncome, that many of the variables that are signficantly correlated with Attrition are also collinear with each other (e.g., YearsInCurrentRole and YearsAtCompany). For now, we will move forward with this model.
+
+In order to train our model, we are going to use the sample employees provided to us and train/test on a 50/50 split. Before partitioning the data, we find the unique combinations of categorical variables and how many employees have those combinations. If there is a combination with only 1 employee, we remove that employee from the train/test datasets. This initial step removes 59 employees from the sample.
+
+```{r nb1, warning=FALSE}
+# Count rows in sample
+nrow(df)
+
+# Identify combinations that only occur once
+mydf = df %>%
+  mutate(all = paste(Attrition,OverTime,Role,
+                     MaritalStatus,Department,BusinessTravel)) %>%
+  group_by(all) %>%
+  summarise(total=n()) %>%
+  filter(total>=2)
+
+# Remove combinations that only occur once
+df0 = df[paste(df$Attrition,df$OverTime,df$Role,df$MaritalStatus,df$Department,df$BusinessTravel) %in% mydf$all,] 
+
+# Now count rows in sample
+nrow(df0)
+```
+
+Now that we have narrowed our data down, we can partition the data and train our model.
+
+```{r nb2, warning=FALSE}
+# Narrow down sample to variables of interest
+df1 = subset(df0, select=c(Attrition,MonthlyIncome,JobLevel,TotalWorkingYears,YearsInCurrentRole, 
+                           JobInvolvement,YearsWithCurrManager,JobSatisfaction,StockOptionLevel,Age,
+                           DistanceFromHome,WorkLifeBalance, EnvironmentSatisfaction,
+                           OverTime,Role,NumCompaniesWorked,YearsAtCompany,TrainingTimesLastYear,
+                           MaritalStatus,Department,BusinessTravel))
+
+# Randomize order of rows
+set.seed(201)
+df1_idx = sample(1:nrow(df1), replace = FALSE)
+df1 = df1[df1_idx, ]
+
+# Partition into 50/50 train/test split
+indxTrain = createDataPartition(y = df1$Attrition,p = 0.5,list = FALSE)
+training = df1[indxTrain,]
+testing = df1[-indxTrain,]
+
+# #Check dimensions of the split
+# prop.table(table(df1$Attrition)) * 100
+# prop.table(table(training$Attrition)) * 100
+# prop.table(table(testing$Attrition)) * 100
+# # Check 50/50 split
+# nrow(training)/nrow(df1)
+
+# Separate predictor variables and Attrition
+x = training[,-1]
+y = training[,1]
+
+# Train for specificity
+trainMethod = trainControl( method = "repeatedcv", number = 25, repeats = 5, summaryFunction = twoClassSummary, classProbs = TRUE)
+set.seed(201)
+model = train(x,y,method = "nb", metric = "Spec", trControl = trainMethod)
+# model
+
+# Predict testing set
+Predict = predict(model,newdata = testing[,-1] )
+
+# Model performance
+confusionMatrix(Predict, testing$Attrition )
+
+```
+
+As the results of our model show above, our model has a Sensitivity rate of 89% and a Specificity rate of 66%. We expected our model to have a higher Sensitvity rate than Specificity rate because, since our base sample of employees had far fewer attritions ("Y") than no attrition ("N"), we would expect our rate of correctly labeling "N" as "N" (Sensitivity rate) to be higher than correctly labeling "Y" as "Y" (Specificity rate).
+
+As we see below, MaritalStatus, StockOptionLevel, and YearsInCurrentRole are the top 3 contributers to the model for predicting Attrition.
+
+```{r nb3, warning=FALSE, out.width="100%"}
+
+# Plot variable performance
+plot(varImp(model))
+
+```
+
+# Monthly Income
+
+## Exploratory Data Analysis
+
+Our next task was to build a linear regression model for predicting Monthly Income. In order to accomplish that, not only did we look at what variables were highly correlated with Monthly Income, but also what variables were correlated with each other. Our goal was to build a model that not only had as few predictors as necessary but also was without any collinear variables.
+
+### Numeric Variables
+
+First, we check for variables that are linearly related to Monthly Income.
+
+```{r lm}
+# Function for extracting p-value from linear model
+lmp = function (modelobject) {
+  if (class(modelobject) != "lm") stop("Not an object of class 'lm' ")
+  f = summary(modelobject)$fstatistic
+  p = pf(f[1],f[2],f[3],lower.tail=F)
+  attributes(p) <- NULL
+  return(p)
+}
+
+# Iteratively calculate p-value and r^2 from linear models, comparing numeric variables to MonthlyIncome
+lms = list()
+my_cols = vector()
+rsqr = vector()
+p=vector()
+for (i in 4 : 26) {
+  my_lm = lm(df_num$MonthlyIncome ~ df_num[,i])
+  lms[[i]] = summary(my_lm)
+  my_cols[i-3] = colnames(df_num)[i]
+  rsqr[i-3] = summary(my_lm)$r.squared
+  p[i-3]=lmp(my_lm)
+}
+my_lm = lm(df_num$MonthlyIncome ~ df_num[,2])
+lms[[2]] = summary(my_lm)
+my_cols[27-3] = colnames(df_num)[2]
+rsqr[27-3] = summary(my_lm)$r.squared
+p[27-3]=lmp(my_lm)
+
+lm_fits = as.data.frame(cbind(my_cols,rsqr,p))
+lm_fits$p.num = as.numeric(as.character(lm_fits$p))
+lm_fits = subset(lm_fits, select=-p)
+lm_fits$p.num = round(lm_fits$p.num,10)
+lm_fits = lm_fits %>% arrange(p.num)
+lm_fits1=subset(lm_fits, select=c(my_cols, rsqr, p.num)) %>% dplyr::filter(my_cols != "MonthlyIncome")
+kable(lm_fits1,col.names = c("Variable","R-Squared","P-Value"), row.names =FALSE)
+
+```
+
+From the table above, we can see that there are 10 numeric variables that show signficant evidence of linear relationship with MonthlyIncome (10 variables with p-value less than the alpha level of 0.05). The other 13 variables have no evidence of linear relationship with Monthly Income.
+
+Next, we must ensure that we do not include any collinear variables in our linear regression model. When we look at just the variables with "Years" in the name, we see that they are all collinear with each other.
+
+```{r pairs, out.width="100%"}
+
+ggpairs(subset(df_num, select=c(MonthlyIncome,TotalWorkingYears,YearsAtCompany,YearsInCurrentRole,
+                                YearsSinceLastPromotion,YearsWithCurrManager)))
+
+```
+
+Since TotalWorkingYears has the lowest p-value of those, we will exclude the other "Year" variables and compare TotalWorkingYears it to all of the other numeric variables.
+
+```{r pairs2, out.width="100%"}
+
+ggpairs(subset(df_num, select=c(MonthlyIncome,TotalWorkingYears,JobLevel,Age,NumCompaniesWorked,Education)))
+
+```
+
+Because both TotalWorkingYears and Age are corelated with JobLevel and JobLevel has the lowest p-value, we will remove TotalWorkingYears and Age from inclusion in the model. The other variables, NumCompaniesWorked and Education, do not appear to be collinear.  Thus, the only numeric variables that will be included for consideration in the model are:
+
+* JobLevel
+
+* NumCompaniesWorked
+
+* Education
+
+### Categorical Variables
+
+Next, we need to check if any categorical variables are associated with Monthly Income. First, we notice that since Monthly Income is not normally distributed, we can use a Kruskal-Wallis Test to determine whether Monthly Income is distributed differently depending on the category of the variables.
+
+```{r cathist}
+# Display distributino of MonthlyIncome
+ggplot(data=df, aes(x=MonthlyIncome)) + 
+  geom_histogram(binwidth=500) + 
+  ylab("") + 
+  ggtitle("Monthly Income is Right Skewed") + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+# Get p-values from Kruskal-Wallis tests
+kw_fits = data.frame("BusinessTravel",
+                     kruskal.test(MonthlyIncome ~ BusinessTravel, data = df)[[3]])
+names(kw_fits) = c("Variable","p")
+kw_fits$Variable = as.character(kw_fits$Variable)
+
+kw_fits[nrow(kw_fits)+1,]=c("Department",
+                            kruskal.test(MonthlyIncome ~ Department, data = df)[[3]])
+kw_fits[nrow(kw_fits)+1,]=c("EducationField",
+                            kruskal.test(MonthlyIncome ~ EducationField, data = df)[[3]])
+kw_fits[nrow(kw_fits)+1,]=c("Gender",
+                            kruskal.test(MonthlyIncome ~ Gender, data = df)[[3]])
+kw_fits[nrow(kw_fits)+1,]=c("Role",
+                            kruskal.test(MonthlyIncome ~ Role, data = df)[[3]])
+kw_fits[nrow(kw_fits)+1,]=c("MaritalStatus",
+                            kruskal.test(MonthlyIncome ~ MaritalStatus, data = df)[[3]])
+kw_fits[nrow(kw_fits)+1,]=c("OverTime",
+                            kruskal.test(MonthlyIncome ~ OverTime, data = df)[[3]])
+# str(kw_fits)
+# kw_fits
+
+kw_fits$p.num = as.numeric(as.character(kw_fits$p))
+kw_fits = subset(kw_fits, select=-p)
+kw_fits$p.num = round(kw_fits$p.num,10)
+kw_fits = kw_fits[order(kw_fits$p.num),]
+kw_fits1=subset(kw_fits, select=c(Variable, p.num))
+kable(kw_fits1,col.names = c("Variable","P-Value"), row.names =FALSE)
+
+```
+
+To visualize that Role, Department, EducationField, MaritalStatus, and Gender have different distributions based on their categories, we see the density plots below.
+
+```{r catdens, out.width="100%"}
+
+d1=ggplot(data = df, aes(x = MonthlyIncome, color = BusinessTravel)) + geom_density()
+d2=ggplot(data = df, aes(x = MonthlyIncome, color = Department)) + geom_density()
+d3=ggplot(data = df, aes(x = MonthlyIncome, color = EducationField)) + geom_density()
+d4=ggplot(data = df, aes(x = MonthlyIncome, color = Gender)) + geom_density()
+d5=ggplot(data = df, aes(x = MonthlyIncome, color = Role)) + geom_density()
+d6=ggplot(data = df, aes(x = MonthlyIncome, color = MaritalStatus)) + geom_density()
+d7=ggplot(data = df, aes(x = MonthlyIncome, color = OverTime)) + geom_density()
+#fig1=ggarrange(d5,d2,d3,d6,d4, ncol=2,nrow=3)
+#fig1
+d5
+d2
+d3
+d6
+d4
+
+```
+
+Thus, the only characters variables that will be included for consideration in the model are:
+
+* Role
+
+* Department
+
+* EducationField
+
+* MaritalStatus
+
+* Gender
+
+## Modeling Monthly Income - Multiple Linear Regression
+We now proceed to create a linear regression to model Monthly Income. We will use a stepwise selection method for determining which of the 8 variables we will include in our final model.
+
+```{r linmod}
+
+set.seed(201)
+df_step = subset(df, select=c(MonthlyIncome,JobLevel,NumCompaniesWorked,Education,Role,
+                                Department,MaritalStatus,EducationField,Gender))
+
+step_model = lm(MonthlyIncome ~ ., data=df_step)
+ols_step_forward_aic(step_model, details=TRUE)
+final_model = lm(MonthlyIncome ~ JobLevel + Role + NumCompaniesWorked + Gender, data=df)
+summary(final_model)
+
+```
+
+Our final resulting model, as shown above, includes JobLevel, Role, NumCompaniesWorked, and Gender (in order of signficance, based on p-value). These predictors explain approximately 92.39% of the variance in Monthly Income. The RMSE is $1,268. 
+
+# Final Thoughts
+
+In conclusion, there are multiple factors that might contribute to voluntary employee attrition. Some are uncontrollable, such as Marital Status, some are only measurable, such as Years in Current Role, but some can be altered by Frito-Lay to reduce voluntary attrition, such as Stock Option Level, Over Time, Monthly Income, as well as others.
+
+For the next steps, DDSAnalytics recommends the possibility of adjusting fields such as Stock Option Level and Over Time, particularly focusing on Roles that have a higher rate of Attrition, such as Representatives.
+
+Additionally, DDSAnalytics has provided Frito-Lay predictions based on the Attrition and Monthly Income models on the datasets provided for your consideration.
+
+```{r pred, warning=FALSE}
+# Predicting Attrition
+path2="C:/Users/Allison/Desktop/SMU/19U/Doing Data Science/MSDS-6306-Doing-Data-Science/UNIT 14/CaseStudy2CompSet No Attrition.csv"
+NoAttrition = read.csv(path2)
+
+# Subset columns used in model
+NoAttrition1 = subset(NoAttrition, select=c(ID,MonthlyIncome,JobLevel,TotalWorkingYears,YearsInCurrentRole, 
+                                           JobInvolvement,YearsWithCurrManager,JobSatisfaction,StockOptionLevel,Age,
+                                           DistanceFromHome,WorkLifeBalance, EnvironmentSatisfaction,
+                                           OverTime,JobRole,NumCompaniesWorked,YearsAtCompany,TrainingTimesLastYear,
+                                           MaritalStatus,Department,BusinessTravel))
+NoAttrition1 = NoAttrition1 %>% mutate(Role = word(JobRole,-1))
+NoAttrition1$Role = as.factor(NoAttrition1$Role)
+
+# Predict Attrition
+PredAttrition = predict(model, newdata=NoAttrition1)
+NoAttrition2 = cbind(NoAttrition1,PredAttrition) 
+
+# Sanity check - is the rate of Attrition for the predicted values similar to the training set?
+nrow(NoAttrition2[which(NoAttrition2$PredAttrition=="Yes"),])/nrow(NoAttrition2)
+nrow(df[which(df$Attrition=="Yes"),])/nrow(df)
+
+# Sort by ID
+NoAttrition2 = NoAttrition2 %>% arrange(ID) %>% select(ID,PredAttrition)
+
+# Write Attrition predictions to csv
+# write.csv(NoAttrition2,
+#           file="C:/Users/Allison/Desktop/SMU/19U/Doing Data Science/Case2PredictionsRoderick Attrition.csv",
+#           row.names=FALSE)
+
+# Predicting MonthlyIncome
+path3="C:/Users/Allison/Desktop/SMU/19U/Doing Data Science/MSDS-6306-Doing-Data-Science/UNIT 14/CaseStudy2CompSet No Salary.csv"
+NoSalary = read.csv(path3)
+
+# Subset columns used in model
+NoSalary1 = subset(NoSalary, select=c(ID, JobLevel, JobRole, NumCompaniesWorked, Gender))
+NoSalary1 = NoSalary1 %>% mutate(Role = word(JobRole,-1))
+NoSalary1$Role = as.factor(NoSalary1$Role)
+
+# Predict MonthlyIncome
+PredMonthlyInc = predict(final_model, newdata=NoSalary1, type='response')
+
+# Sanity check - is the mean of MonthlyIncome for the predicted values similar to the training set?
+mean(PredMonthlyInc)
+mean(df$MonthlyIncome)
+
+# Sort by ID
+NoSalary2 = cbind(NoSalary1,PredMonthlyInc) %>% arrange(ID) %>% select(ID,PredMonthlyInc)
+
+# Write MonthlyIncome predictions to csv
+# write.csv(NoSalary2,
+#           file="C:/Users/Allison/Desktop/SMU/19U/Doing Data Science/Case2PredictionsRoderick Salary.csv",
+#           row.names=FALSE)
+
+```
